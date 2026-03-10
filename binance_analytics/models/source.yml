@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: warehouse
+    database: warehouse_db
+    schema: public
+    tables:
+      - name: fact_market_candles
+      - name: fact_market_sentiment

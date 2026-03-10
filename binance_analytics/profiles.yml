@@ -1,0 +1,26 @@
+binance_analytics:      # <-- Tên này phải trùng với dòng 'profile' ở bước 1
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: postgres
+      user: admin
+      password: adminpassword
+      port: 5432 #5433
+      dbname: warehouse_db
+      schema: public
+      threads: 1
+
+dbt_snowflake:
+  outputs:
+    dev:
+      account: dhgzdnn-qr32312
+      database: DEV_DB
+      password: 7QzfBVuHVKgn2mx
+      role: SYSADMIN
+      schema: DBT_DEV
+      threads: 4
+      type: snowflake
+      user: lunacbum
+      warehouse: DEV_WH
+  target: dev

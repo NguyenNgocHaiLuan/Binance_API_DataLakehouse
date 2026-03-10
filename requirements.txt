@@ -1,0 +1,8 @@
+apache-airflow-providers-docker
+pandas
+s3fs
+pyarrow
+sqlalchemy
+psycopg2-binary
+dbt-core
+dbt-postgres

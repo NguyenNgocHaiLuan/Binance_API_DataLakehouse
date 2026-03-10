@@ -1,0 +1,183 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  #image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.7.1}
+  build: .
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://admin:adminpassword@postgres:5432/postgres
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./requirements.txt:/requirements.txt
+    - ./binance_analytics:/opt/airflow/dbt/crypto_analytics
+    - ./kafka_producer:/opt/airflow/kafka_producer
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  # 1. DATABASE
+  postgres:
+    image: postgres:13
+    container_name: de_postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: postgres # DB mặc định cho Airflow
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # QUAN TRỌNG: File init.sql để tạo warehouse_db
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql 
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      retries: 5
+    networks:
+      - data-network
+
+  # 2. DATA LAKE
+  minio:
+    image: minio/minio
+    container_name: de_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    networks:
+      - data-network
+    volumes:
+      - minio_data:/data
+
+  # 3. MESSAGE QUEUE
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: de_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - data-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: de_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Internal dùng cổng 29092, External (localhost) dùng 9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - data-network
+
+  # 4. PROCESSING
+  spark-master:
+    image: public.ecr.aws/bitnami/spark:3.5
+    container_name: de_spark_master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    networks:
+      - data-network
+    volumes:
+      - ./scripts:/opt/bitnami/spark/scripts # [FIX] Mount code vào để chạy
+
+  spark-worker-1:
+    image: public.ecr.aws/bitnami/spark:3.5
+    container_name: de_spark_worker_1
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G # [FIX] Tăng lên > SPARK_WORKER_MEMORY
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    depends_on:
+      - spark-master
+    networks:
+      - data-network
+    volumes:
+      - ./scripts:/opt/bitnami/spark/scripts # [FIX] Mount code vào worker
+
+  # 5. ORCHESTRATION
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - data-network
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    networks:
+      - data-network
+
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+    networks:
+      - data-network
+
+  # 6. VISUALIZATION
+  metabase:
+    image: metabase/metabase
+    container_name: de_metabase
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: warehouse_db
+      MB_DB_PORT: 5432
+      MB_DB_USER: ${MB_DB_USER}
+      MB_DB_PASS: ${MB_DB_PASS}
+      MB_DB_HOST: ${MB_DB_HOST}
+    networks:
+      - data-network
+    depends_on:
+      - postgres
+
+networks:
+  data-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
