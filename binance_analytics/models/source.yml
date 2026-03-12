@@ -7,3 +7,4 @@ sources:
     tables:
       - name: fact_market_candles
       - name: fact_market_sentiment
+      - name: mart_market_overview

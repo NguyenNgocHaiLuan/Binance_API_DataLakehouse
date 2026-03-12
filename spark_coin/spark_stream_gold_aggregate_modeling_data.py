@@ -1,11 +1,7 @@
-from pyspark.sql.functions import col, window, max, min, first, last, sum, count, expr, current_timestamp, from_json
-import logging
-import time
 from pyspark.sql import SparkSession
-# THÊM IMPORT LongType để xử lý timestamp mili-giây từ Kafka
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType, BooleanType, LongType
+from pyspark.sql.functions import col, window, max, min, first, last, sum, count, expr, current_timestamp
+from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType, TimestampType, BooleanType
 
-# Cấu hình MinIO (Vẫn giữ để lưu Checkpoint)
 MINIO_CONF = {
     "endpoint": "http://minio:9000",
     "access_key": "minio_admin",
@@ -21,7 +17,7 @@ DB_PROPERTIES = {
 
 def create_spark_session():
     return SparkSession.builder \
-        .appName("BinanceGoldSpeedLayer") \
+        .appName("BinanceGoldAggregation") \
         .config("spark.hadoop.fs.s3a.endpoint", MINIO_CONF["endpoint"]) \
         .config("spark.hadoop.fs.s3a.access.key", MINIO_CONF["access_key"]) \
         .config("spark.hadoop.fs.s3a.secret.key", MINIO_CONF["secret_key"]) \
@@ -31,7 +27,7 @@ def create_spark_session():
         .getOrCreate()
 
 def write_to_postgres(df, epoch_id):
-    print(f"Writing batch {epoch_id} to PostgreSQL")
+    print(f"Writing batch {epoch_id} to PostgreSQL...")
     try:
         df.write \
             .mode("append") \
@@ -42,42 +38,36 @@ def write_to_postgres(df, epoch_id):
             .option("password", DB_PROPERTIES["password"]) \
             .option("driver", DB_PROPERTIES["driver"]) \
             .save()
-        print(f"Batch {epoch_id} written to PostgreSQL successfully")
+        print(f"Batch {epoch_id} written successfully")
     except Exception as e:
-        print(f"Error writting batch {epoch_id}: {e}")
+        print(f"Error writing batch {epoch_id}: {e}")
 
 def main():
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
-    print("Spark Speed Layer Started (Kafka -> Postgres)")
+    print("Gold Aggregation Job Started...")
 
-    # 1. ĐỊNH NGHĨA SCHEMA JSON (Khớp với Producer gửi)
-    kafka_schema = StructType([
+    silver_schema = StructType([
         StructField("symbol", StringType(), True),
         StructField("price", DoubleType(), True),
         StructField("quantity", DoubleType(), True),
-        StructField("trade_time", LongType(), True),      # Quan trọng: LongType
+        StructField("trade_timestamp", TimestampType(), True),
         StructField("is_buyer_maker", BooleanType(), True),
-        StructField("ingested_at", StringType(), True)
+        StructField("ingested_at",    StringType(),  True),
+        StructField("year",           LongType(),    True),
+        StructField("month",          LongType(),    True),
+        StructField("day",            LongType(),    True),
+        StructField("hour",           LongType(),    True),
     ])
 
-    # 2. ĐỌC TỪ KAFKA (Thay vì Parquet)
-    raw_kafka_df = spark.readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "kafka:29092") \
-        .option("subscribe", "crypto_trade_price_1") \
-        .option("startingOffsets", "latest") \
-        .option("failOnDataLoss", "true") \
+    # Đọc từ Silver Parquet
+    silver_df = spark.readStream \
+        .format("parquet") \
+        .schema(silver_schema) \
+        .option("path", "s3a://silver/crypto_trades/") \
         .load()
 
-    # 3. GIẢI MÃ JSON & CHUYỂN ĐỔI THỜI GIAN
-    silver_df = raw_kafka_df.selectExpr("CAST(value AS STRING) as json_str") \
-        .select(from_json(col("json_str"), kafka_schema).alias("data")) \
-        .select("data.*") \
-        .withColumn("trade_timestamp", (col("trade_time") / 1000).cast(TimestampType())) \
-        .withColumn("ingest_timestamp", col("ingested_at").cast(TimestampType()))
-
-    # 4. TÍNH TOÁN NẾN (Giữ nguyên logic cực xịn của bạn)
+    # Aggregate: tính nến 1 phút
     gold_df = silver_df \
         .withWatermark("trade_timestamp", "10 minutes") \
         .groupBy(
@@ -102,16 +92,16 @@ def main():
             current_timestamp().alias("ingested_at")
         )
     
-    # 5. GHI VÀO POSTGRES
-    # LƯU Ý: Đổi tên checkpoint để không bị lỗi xung đột với code cũ
+    # syntax thiếu newline giữa .option() và .trigger()
     query = gold_df.writeStream \
         .outputMode("append") \
         .foreachBatch(write_to_postgres) \
-        .option("checkpointLocation", "s3a://silver/_checkpoints/fact_candles_realtime_v4/")        .trigger(processingTime="1 minute") \
+        .option("checkpointLocation", "s3a://gold/_checkpoints/fact_candles/") \
+        .trigger(once=True) \
         .start()
-    
-    print("Streaming to Gold layer is running...")
+
     query.awaitTermination()
+    print("Gold aggregation complete — data written to PostgreSQL")
 
 if __name__ == "__main__":
     main()

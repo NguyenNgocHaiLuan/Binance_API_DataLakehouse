@@ -10,6 +10,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
   volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
@@ -89,7 +90,9 @@ services:
 
   # 4. PROCESSING
   spark-master:
-    image: public.ecr.aws/bitnami/spark:3.5
+    build:
+      context: .
+      dockerfile: dockerfile.spark
     container_name: de_spark_master
     environment:
       - SPARK_MODE=master
@@ -166,8 +169,8 @@ services:
       MB_DB_TYPE: postgres
       MB_DB_DBNAME: warehouse_db
       MB_DB_PORT: 5432
-      MB_DB_USER: ${MB_DB_USER}
-      MB_DB_PASS: ${MB_DB_PASS}
+      MB_DB_USER: admin
+      MB_DB_PASS: adminpassword
       MB_DB_HOST: ${MB_DB_HOST}
     networks:
       - data-network

@@ -16,7 +16,7 @@ stream_string = "/".join([f"{symbol}@aggTrade" for symbol in SYMBOLS])
 # Dùng endpoint '/stream?streams=' thay vì '/ws/'
 BINANCE_SOCKET = f'wss://stream.binance.com:9443/stream?streams={stream_string}'
 
-# ạo topic nếu chưa tồn tại
+# Tạo topic nếu chưa tồn tại
 def create_topic():
     admin_client = AdminClient({'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS})
     topic_list = [NewTopic(KAFKA_TOPIC, num_partitions=1, replication_factor=1)]

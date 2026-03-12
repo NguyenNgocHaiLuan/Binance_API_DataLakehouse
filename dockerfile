@@ -1,5 +1,11 @@
 FROM apache/airflow:2.7.1
 
-COPY requirements.txt /requirements.txt
+USER root
+RUN apt-get update && \
+    apt-get install -y docker.io && \
+    apt-get clean
 
-RUN pip install --no-cache-dir -r /requirements.txt
+COPY requirements.txt /tmp/requirements.txt
+
+USER airflow
+RUN pip install --no-cache-dir -r /tmp/requirements.txt

@@ -1,4 +1,4 @@
-binance_analytics:      # <-- Tên này phải trùng với dòng 'profile' ở bước 1
+binance_analytics:
   target: dev
   outputs:
     dev:

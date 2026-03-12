@@ -1,13 +1,16 @@
-import time
-import os
 from pyspark.sql import SparkSession
-# Thêm các hàm cần thiết để xử lý Kafka và thời gian
-from pyspark.sql.functions import col, from_json, to_timestamp, current_timestamp, year, month, dayofmonth, hour
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, BooleanType
+from pyspark.sql.functions import (
+    col, year, month, dayofmonth,
+    when, round, log, lit, current_timestamp
+)
+from pyspark.sql.types import (
+    StructType, StructField, StringType,
+    DoubleType, LongType, BooleanType
+)
 
 def create_spark_session():
     return SparkSession.builder \
-        .appName("BinanceSilverStreaming") \
+        .appName("BinanceSilverTransform") \
         .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
         .config("spark.hadoop.fs.s3a.access.key", "minio_admin") \
         .config("spark.hadoop.fs.s3a.secret.key", "minio_password") \
@@ -18,59 +21,87 @@ def create_spark_session():
 
 def main():
     spark = create_spark_session()
-    sc = spark.sparkContext
-    sc.setLogLevel("WARN")
-    
-    print("Silver Streaming Job Started...")
+    spark.sparkContext.setLogLevel("WARN")
+    print("Silver Transform Job Started...")
 
-    # 1. Định nghĩa Schema khớp với dữ liệu JSON bắn từ Producer
-    kafka_schema = StructType([
-        StructField("symbol", StringType(), True),
-        StructField("price", DoubleType(), True),
-        StructField("quantity", DoubleType(), True),
-        StructField("trade_time", LongType(), True), 
+    # Schema phải khớp với những gì Bronze ghi ra
+    bronze_schema = StructType([
+        StructField("source",         StringType(),  True),
+        StructField("symbol",         StringType(),  True),
+        StructField("price",          DoubleType(),  True),
+        StructField("quantity",       DoubleType(),  True),
+        StructField("trade_time",     LongType(),    True),
         StructField("is_buyer_maker", BooleanType(), True),
-        StructField("ingested_at", StringType(), True)
+        StructField("ingested_at",    StringType(),  True),
+        StructField("year",           LongType(),    True),
+        StructField("month",          LongType(),    True),
+        StructField("day",            LongType(),    True),
+        StructField("hour",           LongType(),    True),
     ])
 
-    # 2. ĐỌC TỪ KAFKA (Thay vì đọc file Parquet Bronze)
-    raw_kafka_df = spark.readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "kafka:29092") \
-        .option("subscribe", "crypto_trade_price_1") \
-        .option("startingOffsets", "earliest") \
-        .option("failOnDataLoss", "true") \
+    # 1. ĐỌC TỪ BRONZE — bắt buộc khai báo schema khi đọc streaming Parquet
+    bronze_df = spark.readStream \
+        .format("parquet") \
+        .schema(bronze_schema) \
+        .option("path", "s3a://bronze/crypto_trades/") \
         .load()
 
-    # 3. Parse JSON và Chuyển đổi dữ liệu
-    silver_df = raw_kafka_df.selectExpr("CAST(value AS STRING) as json_string") \
-        .select(from_json(col("json_string"), kafka_schema).alias("data")) \
-        .select("data.*") \
+    # 2. CLEAN — Lọc bỏ data rác
+    cleaned_df = bronze_df \
+        .filter(col("price").isNotNull() & (col("price") > 0)) \
+        .filter(col("quantity").isNotNull() & (col("quantity") > 0)) \
+        .filter(col("symbol").isNotNull()) \
+        .filter(col("trade_time").isNotNull()) \
+        .filter(col("price") < 1_000_000)   # loại giá bất thường
+
+    # 3. TRANSFORM — Chuẩn hóa kiểu dữ liệu
+    transformed_df = cleaned_df \
         .withColumn("trade_timestamp", (col("trade_time") / 1000).cast("timestamp")) \
         .withColumn("ingest_timestamp", col("ingested_at").cast("timestamp")) \
-        .withColumn("year", year(col("trade_timestamp"))) \
-        .withColumn("month", month(col("trade_timestamp"))) \
-        .withColumn("day", dayofmonth(col("trade_timestamp"))) \
-        .drop("trade_time", "ingested_at", "json_string") \
-        .withWatermark("trade_timestamp", "10 minutes") \
-        .dropDuplicates(["symbol", "trade_timestamp"])
-    
-    print("Silver Schema Transformed:")
-    silver_df.printSchema()
+        .withColumn("price",    round(col("price"), 8)) \
+        .withColumn("quantity", round(col("quantity"), 8)) \
+        .drop("trade_time", "ingested_at", "year", "month", "day", "hour")  # drop partition cũ, tính lại
 
-    # 4. GHI VÀO MINIO (SILVER LAYER)
-    # Dữ liệu sẽ được lưu theo cấu trúc: silver/crypto_trades/year=2024/month=10/day=25/...
-    query = silver_df.writeStream \
+    # 4. ENRICH — Tính thêm các trường phân tích
+    enriched_df = transformed_df \
+        .withColumn("trade_value", round(col("price") * col("quantity"), 8)) \
+        .withColumn("trade_side",
+            when(col("is_buyer_maker") == False, lit("BUY"))
+            .otherwise(lit("SELL"))
+        ) \
+        .withColumn("price_magnitude", round(log(col("price")) / log(lit(10.0)), 2)) \
+        .withColumn("is_large_trade",
+            when(col("trade_value") > 10000, lit(True))
+            .otherwise(lit(False))
+        ) \
+        .withColumn("processed_at", current_timestamp())
+
+    # 5. DEDUPLICATE
+    deduped_df = enriched_df \
+        .withWatermark("trade_timestamp", "10 minutes") \
+        .dropDuplicates(["symbol", "trade_timestamp", "price", "quantity"])
+
+    # 6. Thêm lại partition columns từ trade_timestamp mới
+    final_df = deduped_df \
+        .withColumn("year",  year(col("trade_timestamp"))) \
+        .withColumn("month", month(col("trade_timestamp"))) \
+        .withColumn("day",   dayofmonth(col("trade_timestamp")))
+
+    print("Silver Schema:")
+    final_df.printSchema()
+
+    # 7. GHI VÀO MINIO/SILVER
+    query = final_df.writeStream \
         .format("parquet") \
         .outputMode("append") \
         .option("path", "s3a://silver/crypto_trades/") \
-        .option("checkpointLocation", "s3a://silver/_checkpoints/crypto_trades_kafka_v14/") \
+        .option("checkpointLocation", "s3a://silver/_checkpoints/crypto_trades_v1/") \
         .partitionBy("year", "month", "day") \
-        .trigger(processingTime="1 minute") \
+        .trigger(once=True) \
         .start()
-    
-    print("Streaming is running and Writing to MinIO/silver...")
+
     query.awaitTermination()
+    print("Silver transform complete — data written to MinIO/silver")
 
 if __name__ == "__main__":
     main()
