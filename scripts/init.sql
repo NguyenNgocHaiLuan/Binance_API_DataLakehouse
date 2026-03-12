@@ -1,2 +1,0 @@
-CREATE DATABASE warehouse_db;
-GRANT ALL PRIVILEGES ON DATABASE warehouse_db TO admin;
