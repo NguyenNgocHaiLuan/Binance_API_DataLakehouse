@@ -2,16 +2,22 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, window, max, min, first, last, sum, count, expr, current_timestamp
 from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType, TimestampType, BooleanType
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 MINIO_CONF = {
-    "endpoint": "http://minio:9000",
-    "access_key": "minio_admin",
-    "secret_key": "minio_password"
+    "endpoint": os.getenv("MINIO_ENDPOINT"), 
+    "access_key": os.getenv("MINIO_ACCESS_KEY"),
+    "secret_key": os.getenv("MINIO_SECRET_KEY")
 }
 
 DB_URL = "jdbc:postgresql://postgres:5432/warehouse_db"
+
 DB_PROPERTIES = {
-    "user": "admin",
-    "password": "adminpassword",
+    "user": os.getenv("POSTGRES_USER"),
+    "password": os.getenv("POSTGRES_PASSWORD"),
     "driver": "org.postgresql.Driver"
 }
 

@@ -7,13 +7,22 @@ from pyspark.sql.types import (
     StructType, StructField, StringType,
     DoubleType, LongType, BooleanType
 )
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+MINIO_CONF = {
+    "endpoint": os.getenv("MINIO_ENDPOINT"), 
+    "access_key": os.getenv("MINIO_ACCESS_KEY"),
+    "secret_key": os.getenv("MINIO_SECRET_KEY")
+}
 
 def create_spark_session():
     return SparkSession.builder \
         .appName("BinanceSilverTransform") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", "minio_admin") \
-        .config("spark.hadoop.fs.s3a.secret.key", "minio_password") \
+        .config("spark.hadoop.fs.s3a.endpoint", MINIO_CONF["endpoint"]) \
+        .config("spark.hadoop.fs.s3a.access.key", MINIO_CONF["access_key"]) \
+        .config("spark.hadoop.fs.s3a.secret.key", MINIO_CONF["secret_key"]) \
         .config("spark.hadoop.fs.s3a.path.style.access", "true") \
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
         .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
@@ -95,7 +104,7 @@ def main():
         .format("parquet") \
         .outputMode("append") \
         .option("path", "s3a://silver/crypto_trades/") \
-        .option("checkpointLocation", "s3a://silver/_checkpoints/crypto_trades_v1/") \
+        .option("checkpointLocation", "s3a://silver/_checkpoints/crypto_trades_v4/") \
         .partitionBy("year", "month", "day") \
         .trigger(once=True) \
         .start()
