@@ -55,14 +55,14 @@ Metabase (Dashboard)
 - Current price, 24h price change %, High/Low per symbol
 - Buy vs Sell volume ratio
 - Total trades per symbol
-- 
+  
 ![Dashboard](./images/mark_overview.png)
 
 ### 2. OHLC Candlestick Summary
 - Open / High / Low / Close per minute
 - Bullish vs Bearish candle distribution
 - Buy pressure % per hour heatmap
-- 
+  
 ![Dashboard](./images/OHLC_Analysis.png)
 
 ### 3. Pipeline Health Monitoring
